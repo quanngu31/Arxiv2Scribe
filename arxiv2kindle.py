@@ -1,161 +1,167 @@
 import os
 import re
+import shutil
+import subprocess
 import sys
-import wget
-import click
 import tarfile
 import tempfile
-import requests
-import subprocess
-from glob import glob
-import lxml.html as html
 from pathlib import Path
-from getpass import getpass
+from typing import Optional
 
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
+import lxml.html as html
+import requests
+import typer
+import wget
 
+# from getpass import getpass
 
-def delete_dir(dir_name):
-    subprocess.run(['rm', '-rf', dir_name])
+# import smtplib
+# from email.mime.multipart import MIMEMultipart
+# from email.mime.application import MIMEApplication
 
 
 class Arxiv2KindleConverter:
-
-    def __init__(self, arxiv_url: str, is_landscape: bool) -> None:
+    def __init__(self, arxiv_url: str):
         self.arxiv_url = arxiv_url
-        self.is_landscape = is_landscape
+        self.arxiv_id = re.match(r"((http|https)://.*?/)?(?P<id>\d{4}\.\d{4,5}(v\d{1,2})?)", self.arxiv_url).group("id")
         self.check_prerequisite()
-    
+
     def check_prerequisite(self):
-        result = subprocess.run(["pdflatex", "--version"], stdout=None, stderr=None)
+        result = subprocess.run(["latexmk", "-version"], stdout=None, stderr=None)
         if result.returncode != 0:
-            raise SystemError("no pdflatex found")
-        if self.is_landscape:
-            result = subprocess.run(["pdftk", "--version"], stdout=None, stderr=None)
-            if result.returncode != 0:
-                raise SystemError("no pdftk found (required for landscape mode)")
-    
-    def download_source(self):
-        arxiv_id = re.match(r'((http|https)://.*?/)?(?P<id>\d{4}\.\d{4,5}(v\d{1,2})?)', self.arxiv_url).group('id')
-        arxiv_abs = f'http://arxiv.org/abs/{arxiv_id}'
-        arxiv_pdf = f'http://arxiv.org/pdf/{arxiv_id}'
+            raise SystemError("System does not have latexmk")
+
+    def download_source(self) -> (str, str):
+        arxiv_abs = f"https://arxiv.org/abs/{self.arxiv_id}"
         arxiv_pgtitle = html.fromstring(
-            requests.get(arxiv_abs).text.encode('utf8')).xpath('/html/head/title/text()')[0]
-        arxiv_title = re.sub(r'\s+', ' ', re.sub(r'^\[[^]]+\]\s*', '', arxiv_pgtitle), re.DOTALL)
-        # create temporary directory
-        arxiv_dir = tempfile.mkdtemp(prefix='arxiv2kindle_')
-        archive_url = f'http://arxiv.org/e-print/{arxiv_id}'
-        # download tar.gz file and add file extension
-        tar_filename = wget.download(
-            archive_url, out=os.path.join(
-                arxiv_dir, ''.join([arxiv_title, '.tar.gz'])))
-        if not Path(tar_filename).exists():
-            raise SystemError('Paper sources are not available')
-        with tarfile.open(tar_filename) as f:
-            f.extractall(arxiv_dir)
-        return arxiv_dir, arxiv_id, arxiv_title
-    
-    def process_tex(self, arxiv_dir, geometric_settings):
-        texfiles = glob(os.path.join(arxiv_dir, '*.tex'))
-        for texfile in texfiles:
-            with open(texfile, 'r') as f:
+            requests.get(arxiv_abs).text.encode("utf8")
+        ).xpath("/html/head/title/text()")[0]
+        arxiv_title = re.sub(r"\s+", " ", re.sub(r"^\[[^]]+\]\s*", "", arxiv_pgtitle))
+
+        tar_filename = Path.cwd() / (arxiv_title + ".tar.gz")
+        if not tar_filename.exists():
+            arxiv_latex_src_url = f"https://arxiv.org/src/{self.arxiv_id}"
+            wget.download(arxiv_latex_src_url, out=str(tar_filename))
+            if not tar_filename.exists():
+                raise SystemError("Paper Latex source not available")
+        return arxiv_title, str(tar_filename)
+
+    def process_tex(self, arxiv_dir, width, height, margin):
+        all_texfiles = [str(p) for p in Path(arxiv_dir).rglob("*.tex")]
+        kindle_scribe_geometry = f"\\usepackage[papersize={{{width}in,{height}in}}, margin={margin}in]{{geometry}}\n"
+
+        # find files that already have a \usepackage{geometry} declaration
+        geometry_files = []
+        for texfile in all_texfiles:
+            with open(texfile, "r") as f:
+                content = f.read()
+            if re.search(r"\\usepackage(\[.*?\])?\{geometry\}", content):
+                geometry_files.append((texfile, content))
+
+        if len(geometry_files) > 1:
+            raise RuntimeError(
+                f"Found \\usepackage{{geometry}} in multiple files: {[f for f, _ in geometry_files]}"
+            )
+        elif len(geometry_files) == 1:
+            target_file, content = geometry_files[0]
+            print(f"Overwriting geometry in {target_file}", file=sys.stderr)
+            new_content = re.sub(
+                r"\\usepackage(\[.*?\])?\{geometry\}",
+                lambda _: kindle_scribe_geometry.rstrip("\n"),
+                content,
+            )
+            os.rename(target_file, target_file + ".bak")
+            with open(target_file, "w") as f:
+                f.write(new_content)
+            main_texfile = target_file
+        else:
+            # fallback: find the main .tex file by \documentclass and inject geometry
+            main_texfile = None
+            for texfile in all_texfiles:
+                with open(texfile, "r") as f:
+                    content = f.read()
+                if r"\documentclass" in content:
+                    main_texfile = texfile
+                    print(f"Main file is {main_texfile}", file=sys.stderr)
+                    break
+            if main_texfile is None:
+                raise FileNotFoundError("Could not find main .tex file")
+
+            with open(main_texfile, "r") as f:
                 src = f.readlines()
-            if 'documentclass' in src[0]:
-                print('correct file: ' + texfile)
-                break
-        # filter comments/newlines for easier debugging:
-        src = [line for line in src if line[0] != '%' and len(line.strip()) > 0]
-        # strip font size, column stuff, and paper size stuff in documentclass line:
-        src[0] = re.sub(r'\b\d+pt\b', '', src[0])
-        src[0] = re.sub(r'\b\w+column\b', '', src[0])
-        src[0] = re.sub(r'\b\w+paper\b', '', src[0])
-        src[0] = re.sub(r'(?<=\[),', '', src[0]) # remove extraneous starting commas
-        src[0] = re.sub(r',(?=[\],])', '', src[0]) # remove extraneous middle/ending commas
-        # find begin{document}:
-        begindocs = [i for i, line in enumerate(src) if line.startswith(r'\begin{document}')]
-        assert(len(begindocs) == 1)
-        src.insert(begindocs[0], '\\usepackage['+','.join(
-            k+'='+v for k,v in geometric_settings.items())+']{geometry}\n')
-        src.insert(begindocs[0], '\\usepackage{times}\n')
-        src.insert(begindocs[0], '\\pagestyle{empty}\n')
-        if self.is_landscape:
-            src.insert(begindocs[0], '\\usepackage{pdflscape}\n')
-        for i in range(len(src)):
-            line = src[i]
-            m = re.search(r'\\includegraphics\[width=([.\d]+)\\(line|text)width\]', line)
-            if m:
-                mul = m.group(1)
-                src[i] = re.sub(
-                    r'\\includegraphics\[width=([.\d]+)\\(line|text)width\]',
-                    '\\includegraphics[width={mul}\\\\textwidth,height={mul}\\\\textheight,keepaspectratio]'.format(mul=mul),
-                    line
-                )
-        os.rename(texfile, texfile + '.bak')
-        with open(texfile, 'w') as f:
-            f.writelines(src)
+
+            for i, line in enumerate(src):
+                if line.startswith(r"\begin{document}"):
+                    src.insert(i, kindle_scribe_geometry)
+                    break
+
+            os.rename(main_texfile, main_texfile + ".bak")
+            with open(main_texfile, "w") as f:
+                f.writelines(src)
+
         subprocess.run(
-            [
-                'pdflatex', texfile,
-                '&&', 'pdflatex', texfile,
-                '&&', 'pdflatex', texfile
-            ], stdout=sys.stderr,
-            cwd=Path(texfile).parent
+            ["latexmk", "-f", "-pdf", main_texfile],
+            stdout=sys.stderr,
+            cwd=Path(main_texfile).parent,
         )
-        return texfile[:-4] + '.pdf'
-    
-    def execute_pipeline(self, width: int, height: int, margin: float):
-        arxiv_dir, arxiv_id, arxiv_title = self.download_source()
-        print(f'\nArxiv Directory: {arxiv_dir}')
-        print(f'Arxiv Title: {arxiv_title}')
-        if self.is_landscape:
-            width, height = height, width
-        geometric_settings = dict(
-            paperwidth=f'{width}in',
-            paperheight=f'{height}in',
-            margin=f'{margin}in'
-        )
-        try:
-            pdf_file = self.process_tex(arxiv_dir, geometric_settings)
-            print(f'PDF File: {pdf_file}')
-            return pdf_file, arxiv_id, arxiv_title
-        except KeyError:
-            print('Unable to create pdf file')
-            delete_dir(arxiv_dir)
-    
-    def send_emai(self, pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail):
-        msg = MIMEMultipart()
-        pdf_part = MIMEApplication(open(pdf_file, 'rb').read(), _subtype='pdf')
-        pdf_part.add_header(
-            'Content-Disposition', 'attachment',
-            filename=arxiv_id+"_" + arxiv_title + ".pdf")
-        msg.attach(pdf_part)
-        server = smtplib.SMTP('smtp.gmail.com', 587)  
-        server.starttls()
-        gmail_password = getpass(prompt='Enter Gmail Password: ')
-        server.login(gmail, gmail_password)
-        server.sendmail(gmail, kindle_mail, msg.as_string())
-        server.close()
+        return main_texfile.removesuffix(".tex") + ".pdf"
+
+    def execute_pipeline(self, width: float, height: float, margin: float):
+        arxiv_title, tar_filename = self.download_source()
+        print(f"\nArxiv Title: {arxiv_title}")
+
+        with tempfile.TemporaryDirectory(prefix="temp_arxiv2kindle_") as arxiv_dir:
+            with tarfile.open(tar_filename) as f:
+                f.extractall(arxiv_dir, filter="data")
+            pdf_file = self.process_tex(arxiv_dir, width, height, margin)
+            safe_title = re.sub(r"[^\w\s\-.]", "_", arxiv_title).strip()
+            output_pdf = Path.cwd() / f"{safe_title}.pdf"
+            shutil.copy(pdf_file, output_pdf)
+            print(f"PDF File for Kindle: {output_pdf}")
 
 
-@click.command()
-@click.option('--arxiv_url', '-u', help='Arxiv URL')
-@click.option('--width', '-w', default=4, help='Width')
-@click.option('--height', '-h', default=6, help='Height')
-@click.option('--margin', '-m', default=0.2, help='Margin')
-@click.option('--is_landscape', '-l', is_flag=True, help='Flag: Is output landscape')
-@click.option('--gmail', '-g', default=None, help='Your Gmail ID')
-@click.option('--kindle_mail', '-k', default=None, help='Your Kindle ID')
-def main(arxiv_url, width, height, margin, is_landscape, gmail, kindle_mail):
-    assert 0. < margin < 1.
-    converter = Arxiv2KindleConverter(arxiv_url, is_landscape)
-    pdf_file, arxiv_id, arxiv_title = converter.execute_pipeline(width, height, margin)
-    if gmail is not None and kindle_mail is not None:
-        print('Sending Email...')
-        converter.send_emai(pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail)
-        print('Done')
+    # def send_email(self, pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail):
+    #     msg = MIMEMultipart()
+    #     pdf_part = MIMEApplication(open(pdf_file, 'rb').read(), _subtype='pdf')
+    #     pdf_part.add_header(
+    #         'Content-Disposition', 'attachment',
+    #         filename=arxiv_id+"_" + arxiv_title + ".pdf")
+    #     msg.attach(pdf_part)
+    #     server = smtplib.SMTP('smtp.gmail.com', 587)
+    #     server.starttls()
+    #     gmail_password = getpass(prompt='Enter Gmail Password: ')
+    #     server.login(gmail, gmail_password)
+    #     server.sendmail(gmail, kindle_mail, msg.as_string())
+    #     server.close()
 
 
-if __name__ == '__main__':
-    main()
+app = typer.Typer()
+
+
+@app.command()
+def main(
+    arxiv_url: str = typer.Option(..., "--arxiv-url", "-u", help="arXiv paper URL"),
+    width: float = typer.Option(5.25, "--width", "-w", help="Paper width in inches"),
+    height: float = typer.Option(7, "--height", "-h", help="Paper height in inches"),
+    margin: float = typer.Option(0.45, "--margin", "-m", help="Margin in inches (0.0 - 1.0)"),
+    gmail: Optional[str] = typer.Option(
+        None, "--gmail", "-g", help="Gmail address for sending to Kindle"
+    ),
+    kindle_mail: Optional[str] = typer.Option(
+        None, "--kindle-mail", "-k", help="Kindle email address"
+    ),
+):
+    if not (0.0 < margin < 1.0):
+        raise typer.BadParameter("must be between 0 and 1", param_hint="'--margin'")
+
+    converter = Arxiv2KindleConverter(arxiv_url)
+    converter.execute_pipeline(width, height, margin)
+
+    # if gmail is not None and kindle_mail is not None:
+    #     typer.echo("Sending Email...")
+    #     converter.send_email(pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail)
+    #     typer.echo("Done")
+
+
+if __name__ == "__main__":
+    app()
