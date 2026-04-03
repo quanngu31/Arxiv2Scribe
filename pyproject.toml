@@ -1,6 +1,6 @@
 [project]
-name = "arxiv2kindle"
-version = "1.3.0"
+name = "arxiv2scribe"
+version = "1.4.0"
 requires-python = ">=3.13"
 dependencies = [
     "lxml",
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-arxiv2kindle = "arxiv2kindle:app"
+arxiv2scribe = "arxiv2scribe:app"
 
 [build-system]
 requires = ["hatchling"]

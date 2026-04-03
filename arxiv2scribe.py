@@ -14,7 +14,6 @@ import typer
 import wget
 
 # from getpass import getpass
-
 # import smtplib
 # from email.mime.multipart import MIMEMultipart
 # from email.mime.application import MIMEApplication
