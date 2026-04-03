@@ -10,8 +10,10 @@ from typing import Optional
 
 import lxml.html as html
 import requests
-import typer
 import wget
+
+import typer
+from rich import print
 
 # from getpass import getpass
 # import smtplib
@@ -25,6 +27,8 @@ class Arxiv2KindleConverter:
         self.arxiv_id = re.match(
             r"((http|https)://.*?/)?(?P<id>\d{4}\.\d{4,5}(v\d{1,2})?)", self.arxiv_url
         ).group("id")
+        print(f"> Extracted arxiv ID is {self.arxiv_id}")
+        self.arxiv_title = None
         self.check_prerequisite()
 
     def check_prerequisite(self):
@@ -32,21 +36,25 @@ class Arxiv2KindleConverter:
         if result.returncode != 0:
             raise SystemError("System does not have latexmk")
 
-    def download_source(self) -> (str, str):
-        arxiv_abs = f"https://arxiv.org/abs/{self.arxiv_id}"
+    # returns the tar file of the latex downloaded if succeeds
+    def download_source(self) -> str:
+        arxiv_abs_url = f"https://arxiv.org/abs/{self.arxiv_id}"
         arxiv_pgtitle = html.fromstring(
-            requests.get(arxiv_abs).text.encode("utf8")
+            requests.get(arxiv_abs_url).text.encode("utf8")
         ).xpath("/html/head/title/text()")[0]
         arxiv_title = re.sub(r"\s+", " ", re.sub(r"^\[[^]]+\]\s*", "", arxiv_pgtitle))
+        self.arxiv_title = arxiv_title
+        print(f"\n> Arxiv Title: {arxiv_title}")
 
-        tar_filename = Path.cwd() / (arxiv_title + ".tar.gz")
+        tar_filename = Path.cwd() / (self.arxiv_id + ".tar.gz")
         if not tar_filename.exists():
             arxiv_latex_src_url = f"https://arxiv.org/src/{self.arxiv_id}"
             wget.download(arxiv_latex_src_url, out=str(tar_filename))
             if not tar_filename.exists():
                 raise SystemError("Paper Latex source not available")
-        return arxiv_title, str(tar_filename)
+        return str(tar_filename)
 
+    # returns the name of the PDF compiled after applying geometry options
     def process_tex(self, arxiv_dir, width, height, margin):
         kindle_scribe_geometry = f"\\usepackage[papersize={{{width}in,{height}in}}, margin={margin}in]{{geometry}}\n"
 
@@ -66,7 +74,7 @@ class Arxiv2KindleConverter:
                 main_texfile = texfile
         if main_texfile is None:
             raise FileNotFoundError("Could not find main .tex file")
-        print(f"Main file is {main_texfile}", file=sys.stderr)
+        print(f"> Main file is {main_texfile}")
 
         # Find files that already have a \usepackage{geometry} declaration (may differ from main)
         geometry_files = [
@@ -81,7 +89,7 @@ class Arxiv2KindleConverter:
             )
         elif len(geometry_files) == 1:
             target_file = geometry_files[0]
-            print(f"Overwriting geometry in {target_file}", file=sys.stderr)
+            print(f"> Overwriting geometry in {target_file}")
             new_content = re.sub(
                 r"\\usepackage(\[.*?\])?\{geometry\}",
                 lambda _: kindle_scribe_geometry.rstrip("\n"),
@@ -91,7 +99,8 @@ class Arxiv2KindleConverter:
             with open(target_file, "w") as f:
                 f.write(new_content)
         else:
-            # No geometry package found — inject before \begin{document} in the main file
+            # No geometry package found
+            # inject geometry before \begin{document} in the main file
             src = tex_contents[main_texfile].splitlines(keepends=True)
             for i, line in enumerate(src):
                 if line.startswith(r"\begin{document}"):
@@ -108,32 +117,20 @@ class Arxiv2KindleConverter:
         )
         return main_texfile.removesuffix(".tex") + ".pdf"
 
-    def execute_pipeline(self, width: float, height: float, margin: float):
-        arxiv_title, tar_filename = self.download_source()
-        print(f"\nArxiv Title: {arxiv_title}")
+    def execute_pipeline(self, width: float, height: float, margin: float, output: Optional[Path] = None):
+        tar_src = self.download_source()
 
-        with tempfile.TemporaryDirectory(prefix="temp_arxiv2kindle_") as arxiv_dir:
-            with tarfile.open(tar_filename) as f:
+        with tempfile.TemporaryDirectory(prefix="temp_arxiv2scribe_") as arxiv_dir:
+            with tarfile.open(tar_src) as f:
                 f.extractall(arxiv_dir, filter="data")
             pdf_file = self.process_tex(arxiv_dir, width, height, margin)
-            safe_title = re.sub(r"[^\w\s\-.]", "_", arxiv_title).strip()
-            output_pdf = Path.cwd() / f"{safe_title}.pdf"
+            if output is not None:
+                output_pdf = output
+            else:
+                safe_title = re.sub(r"[^\w\s\-.]", "_", self.arxiv_title).strip()
+                output_pdf = Path.cwd() / f"{safe_title}.pdf"
             shutil.copy(pdf_file, output_pdf)
-            print(f"PDF File for Kindle: {output_pdf}")
-
-    # def send_email(self, pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail):
-    #     msg = MIMEMultipart()
-    #     pdf_part = MIMEApplication(open(pdf_file, 'rb').read(), _subtype='pdf')
-    #     pdf_part.add_header(
-    #         'Content-Disposition', 'attachment',
-    #         filename=arxiv_id+"_" + arxiv_title + ".pdf")
-    #     msg.attach(pdf_part)
-    #     server = smtplib.SMTP('smtp.gmail.com', 587)
-    #     server.starttls()
-    #     gmail_password = getpass(prompt='Enter Gmail Password: ')
-    #     server.login(gmail, gmail_password)
-    #     server.sendmail(gmail, kindle_mail, msg.as_string())
-    #     server.close()
+            print(f"> PDF File for Kindle: {output_pdf}")
 
 
 app = typer.Typer()
@@ -141,29 +138,17 @@ app = typer.Typer()
 
 @app.command()
 def main(
-    arxiv_url: str = typer.Option(..., "--arxiv-url", "-u", help="arXiv paper URL"),
+    arxiv_url: str = typer.Option(..., "--arxiv-url", "-u", help="arXiv URL"),
     width: float = typer.Option(5.25, "--width", "-w", help="Paper width in inches"),
     height: float = typer.Option(7, "--height", "-h", help="Paper height in inches"),
-    margin: float = typer.Option(
-        0.45, "--margin", "-m", help="Margin in inches (0.0 - 1.0)"
-    ),
-    gmail: Optional[str] = typer.Option(
-        None, "--gmail", "-g", help="Gmail address for sending to Kindle"
-    ),
-    kindle_mail: Optional[str] = typer.Option(
-        None, "--kindle-mail", "-k", help="Kindle email address"
-    ),
+    margin: float = typer.Option(0.50, "--margin", "-m", help="Margin in inches"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output PDF path"),
 ):
     if not (0.0 < margin < 1.0):
         raise typer.BadParameter("must be between 0 and 1", param_hint="'--margin'")
 
     converter = Arxiv2KindleConverter(arxiv_url)
-    converter.execute_pipeline(width, height, margin)
-
-    # if gmail is not None and kindle_mail is not None:
-    #     typer.echo("Sending Email...")
-    #     converter.send_email(pdf_file, arxiv_id, arxiv_title, gmail, kindle_mail)
-    #     typer.echo("Done")
+    converter.execute_pipeline(width, height, margin, output)
 
 
 if __name__ == "__main__":
