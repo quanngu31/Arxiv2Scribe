@@ -1,28 +1,21 @@
-# Arxiv2Kindle
+# Arxiv2Scribe
 
-Arxiv2Kindle is a simple script written in python that converts LaTeX source downloaded from Arxiv and recompiles it to better fit a reading device (such as a Kindle).
+Arxiv2Scribe is a simple script that converts LaTeX source (downloaded from Arxiv) and recompiles it to better fit the **Kindle Scribe**.
 
-<!--## Features
+You may change the width and heith settings to better fit your device. However, the code shipped with default settings tailored to the Kindle Scribe (specifically the 2024 version.)
 
-- Arxiv2Kindle can render images, diagrams, tables and formulae.
-- It also converts 2-column formats into a single column for ease of reading.
-- Arxiv2Kindle can mail the converted pdf file to your kindle (if you have a wifi-enabled Kindle).
-
-**Note:**
-
-- Arxiv2Kindle does not work on papers without the source.
-- The fixed transformations applied on the source may not lead to a desired result in a few cases. Still, on most cases the results are readable.-->
+**Notes:** This is a fork from [Arxiv2Kindle](https://github.com/soumik12345/Arxiv2Kindle).
 
 ## Usage
 
 Install the dependencies using `uv sync`.
 
-Arxiv2Kindle can be used via a CLI:
+Arxiv2Scribe can be used via a CLI:
 
 ```
-uv run arxiv2kindle.py --help
+uv run arxiv2scribe.py --help
 
-Usage: arxiv2kindle.py [OPTIONS]
+Usage: arxiv2scribe.py [OPTIONS]
 
 ╭─ Options ────────────────────────────────────────────────────────────────────────────╮
 │ *  --arxiv-url           -u      TEXT   arXiv paper URL [required]                   │
