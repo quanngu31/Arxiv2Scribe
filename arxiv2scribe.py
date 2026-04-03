@@ -62,7 +62,7 @@ class Arxiv2KindleConverter:
                 continue
             texfile = str(path)
             tex_contents[texfile] = content
-            if main_texfile is None and r"\documentclass" in content:
+            if main_texfile is None and path.suffix == ".tex" and r"\documentclass" in content:
                 main_texfile = texfile
         if main_texfile is None:
             raise FileNotFoundError("Could not find main .tex file")
@@ -102,7 +102,7 @@ class Arxiv2KindleConverter:
                 f.writelines(src)
 
         subprocess.run(
-            ["latexmk", "-f", "-pdf", main_texfile],
+            ["latexmk", "-silent", "-f", "-pdf", main_texfile],
             stdout=sys.stderr,
             cwd=Path(main_texfile).parent,
         )
