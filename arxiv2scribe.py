@@ -127,8 +127,8 @@ class Arxiv2KindleConverter:
             if output is not None:
                 output_pdf = output
             else:
-                safe_title = re.sub(r"[^\w\s\-.]", "_", self.arxiv_title).strip()
-                output_pdf = Path.cwd() / f"{safe_title}.pdf"
+                safe_title = re.sub(r"[^\w\s\-.]", "_", self.arxiv_title).strip()[:16]
+                output_pdf = Path.cwd() / f"{self.arxiv_id}_{safe_title}.pdf"
             shutil.copy(pdf_file, output_pdf)
             print(f"> PDF File for Kindle: {output_pdf}")
 
